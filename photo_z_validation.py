@@ -1,10 +1,21 @@
 import pandas as pd 
 import numpy as np
 from weighted_kde import gaussian_kde
-from sklearn.neighbors import KernelDensity
+from cPickle import dumps, load
 
-TEST_DATA = pd.read_csv('test_df.csv')
-TEST_BINNING = z = np.linspace(0, 2.0, 100)
+
+def ld_writedicts(filepath, dictionary):
+    f = open(filepath, 'w')
+    newdata = dumps(dictionary, 1)
+    f.write(newdata)
+    f.close()
+
+
+def ld_readdicts(filepath):
+    f = open(filepath, 'r')
+    d = load(f)
+    f.close()
+    return d
 
 
 def _bias(z_spec, z_phot, weight=None):
@@ -63,7 +74,7 @@ def _normalize_pdf(pdf, dz):
     return pdf / area
 
 
-def mean(df, binning, metric='mean', weights=None, tomo_bins=None, z_phot=None, n_resample=50):
+def mean(df, binning, z_phot, metric='mean', weights=None, tomo_bins=np.array([0, 5.0]), n_resample=50):
     """
     :param df: pandas data-frame
     :param binning: center of redshift bins
@@ -79,147 +90,110 @@ def mean(df, binning, metric='mean', weights=None, tomo_bins=None, z_phot=None, 
     if weights:
         assert weights in df.columns, str(weights) + ' not in df.columns'
         df[weights] = (df[weights] / df[weights].sum()).values  # normalize weights
-    if tomo_bins:
-        assert isinstance(z_phot, np.ndarray), 'z_phot must be a numpy array'
-        assert len(z_phot) == len(df), 'Length of z_phot must be equal to that of df'
-        df['phot_sel'] = z_phot  # Make the selection photo-z a part of the DataFrame
+    else:
+        df[weights] = 1.0 / len(df)  # set uniform weights if none given
+    assert isinstance(z_phot, np.ndarray), 'z_phot must be a numpy array'
+    assert len(z_phot) == len(df), 'Length of z_phot must be equal to that of df'
+    df['phot_sel'] = z_phot  # Make the selection photo-z a part of the DataFrame
     assert 'z_spec' in df.columns, 'The df needs a "z_spec" columns'
+    assert 'pdf_0' in df.columns, 'The pdf values must have pdf_i column name'
     pdf_names = ['pdf_' + str(i) for i in range(500) if 'pdf_' + str(i) in df.columns]
 
     if metric == 'mode':
         df['z_phot'] = binning[np.argmax([df[pdf_names].values], axis=1)][0]
-    if metric == 'mean':
+    elif metric == 'mean':
         df['z_phot'] = np.inner(binning, df[pdf_names].values)
-    if metric == 'median':
-        pass
+    else:
+        print 'Metric needs to be either "mode" or "mean", using mean !'
+        df['z_phot'] = np.inner(binning, df[pdf_names].values)
 
-    if not tomo_bins:
+    mean_spec_bin_array = []
+    err_mean_phot_bin_array = []
 
-        mean_spec_array = []
-        mean_phot_array = []
+    mean_phot_bin_array = []
+    err_mean_spec_bin_array = []
 
-        for i in xrange(n_resample):
-            df_sample = df.sample(n=len(df), replace=True, weights=None)
-            mean_spec_array.append(df_sample.z_spec.mean())
-            mean_phot_array.append(df_sample.z_phot.mean())
+    w_mean_spec_bin_array = []
+    w_err_mean_spec_bin_array = []
 
-        mean_spec = np.mean(mean_spec_array)
-        mean_phot = np.mean(mean_phot_array)
+    w_mean_phot_bin_array = []
+    w_err_mean_phot_bin_array = []
 
-        err_mean_spec = np.std(mean_spec_array)
-        err_mean_phot = np.std(mean_phot_array)
+    df_index = []
+    df_count = []
+    mean_z_bin = []
 
-        if weights:
+    print len(tomo_bins)
+
+    for j in range(len(tomo_bins) - 1):
+        sel = (df.phot_sel > tomo_bins[j]) & (df.phot_sel <= tomo_bins[j + 1])
+        if sel.sum() > 0:
+            df_index.append('z [' + str(tomo_bins[j]) + ', ' + str(tomo_bins[j + 1]) + ']')
+            df_count.append(sel.sum())
+            mean_z_bin.append((tomo_bins[j] + tomo_bins[j + 1]) / 2.0)
+            df_sel = df[sel]
+
+            mean_spec_array = []
+            mean_phot_array = []
+
             w_mean_spec_array = []
             w_mean_phot_array = []
+
             for i in xrange(n_resample):
-                df_sample = df.sample(n=len(df), replace=True, weights=df[weights])
-                w_mean_spec_array.append(df_sample.z_spec.mean())
-                w_mean_phot_array.append(df_sample.z_phot.mean())
+                df_sample = df_sel.sample(n=len(df_sel), replace=True, weights=None)
+                mean_spec_array.append(df_sample.z_spec.mean())
+                mean_phot_array.append(df_sample.z_phot.mean())
 
-        w_mean_spec = np.mean(mean_spec_array)
-        w_mean_phot = np.mean(mean_phot_array)
+                df_sample = df_sel.sample(n=len(df_sel), replace=True, weights=df_sel[weights])
+                w_mean_spec_array.append(np.average(df_sample.z_spec))
+                w_mean_phot_array.append(np.average(df_sample.z_phot))
 
-        w_err_mean_spec = np.std(mean_spec_array)
-        w_err_mean_phot = np.std(mean_phot_array)
+            mean_spec = np.mean(mean_spec_array)
+            mean_phot = np.mean(mean_phot_array)
 
-        combined_array = np.expand_dims([mean_spec, err_mean_spec, mean_phot, err_mean_phot,
-                                         w_mean_spec, w_err_mean_spec, w_mean_phot, w_err_mean_phot], axis=1)
+            err_mean_spec = np.std(mean_spec_array)
+            err_mean_phot = np.std(mean_phot_array)
 
-        return_df = pd.DataFrame(combined_array.T,
-                                 columns=['mean_spec', 'err_mean_spec', 'mean_phot', 'err_mean_phot',
-                                          'w_mean_spec', 'w_err_mean_spec', 'w_mean_phot', 'w_err_mean_phot'])
+            w_mean_spec = np.mean(w_mean_spec_array)
+            w_mean_phot = np.mean(w_mean_phot_array)
 
-        return return_df
+            w_err_mean_spec = np.std(w_mean_spec_array)
+            w_err_mean_phot = np.std(w_mean_phot_array)
 
-    else:  # tomographic bins case
+            mean_spec_bin_array.append(mean_spec)
+            mean_phot_bin_array.append(mean_phot)
 
-        mean_spec_bin_array = []
-        err_mean_phot_bin_array = []
+            err_mean_spec_bin_array.append(err_mean_spec)
+            err_mean_phot_bin_array.append(err_mean_phot)
 
-        mean_phot_bin_array = []
-        err_mean_spec_bin_array = []
+            w_mean_spec_bin_array.append(w_mean_spec)
+            w_mean_phot_bin_array.append(w_mean_phot)
 
-        w_mean_spec_bin_array = []
-        w_err_mean_spec_bin_array = []
+            w_err_mean_spec_bin_array.append(w_err_mean_spec)
+            w_err_mean_phot_bin_array.append(w_err_mean_phot)
 
-        w_mean_phot_bin_array = []
-        w_err_mean_phot_bin_array = []
+        else:
+            print 'Bin ' + str(j) + ' has no objects and it not included in the summary (counting starts at zero)'
 
-        df_index = []
-        df_count = []
-        mean_z_bin = []
+    to_pandas = np.vstack((mean_z_bin, df_count,
+                           mean_spec_bin_array, err_mean_spec_bin_array,
+                           mean_phot_bin_array, err_mean_phot_bin_array,
+                           w_mean_spec_bin_array, w_err_mean_spec_bin_array,
+                           w_mean_phot_bin_array, w_err_mean_phot_bin_array,
+                           )).T
 
-        for j in range(len(tomo_bins) - 1):
-            sel = (df.phot_sel > tomo_bins[j]) & (df.phot_sel <= tomo_bins[j + 1])
-            if sel.sum() > 0:
-                df_index.append('z [' + str(tomo_bins[j]) + ', ' + str(tomo_bins[j + 1]) + ']')
-                df_count.append(sel.sum())
-                mean_z_bin.append((tomo_bins[j] + tomo_bins[j + 1]) / 2.0)
-                df_sel = df[sel]
+    return_df = pd.DataFrame(to_pandas, columns=['mean_z_bin', 'n_obj',
+                                                 'mean_spec', 'err_mean_spec',
+                                                 'mean_phot', 'err_mean_phot',
+                                                 'w_mean_spec', 'w_err_mean_spec',
+                                                 'w_mean_phot', 'w_err_mean_phot',
+                                                 ])
+    return_df.index = df_index
 
-                mean_spec_array = []
-                mean_phot_array = []
-
-                for i in xrange(n_resample):
-                    df_sample = df_sel.sample(n=len(df_sel), replace=True, weights=None)
-                    mean_spec_array.append(df_sample.z_spec.mean())
-                    mean_phot_array.append(df_sample.z_phot.mean())
-
-                mean_spec = np.mean(mean_spec_array)
-                mean_phot = np.mean(mean_phot_array)
-
-                err_mean_spec = np.std(mean_spec_array)
-                err_mean_phot = np.std(mean_phot_array)
-
-                if weights:
-                    w_mean_spec_array = []
-                    w_mean_phot_array = []
-                    for i in xrange(n_resample):
-                        df_sample = df_sel.sample(n=len(df_sel), replace=True, weights=df_sel[weights])
-                        w_mean_spec_array.append(df_sample.z_spec.mean())
-                        w_mean_phot_array.append(df_sample.z_phot.mean())
-
-                w_mean_spec = np.mean(mean_spec_array)
-                w_mean_phot = np.mean(mean_phot_array)
-
-                w_err_mean_spec = np.std(mean_spec_array)
-                w_err_mean_phot = np.std(mean_phot_array)
-
-                mean_spec_bin_array.append(mean_spec)
-                mean_phot_bin_array.append(mean_phot)
-
-                err_mean_spec_bin_array.append(err_mean_spec)
-                err_mean_phot_bin_array.append(err_mean_phot)
-
-                w_mean_spec_bin_array.append(w_mean_spec)
-                w_mean_phot_bin_array.append(w_mean_phot)
-
-                w_err_mean_spec_bin_array.append(w_err_mean_spec)
-                w_err_mean_phot_bin_array.append(w_err_mean_phot)
-
-            else:
-                print 'Bin ' + str(j) + ' has zero objects (bin counting starts at zero)'
-
-        to_pandas = np.vstack((mean_z_bin, df_count,
-                               mean_spec_bin_array, err_mean_spec_bin_array,
-                               mean_phot_bin_array, err_mean_phot_bin_array,
-                               w_mean_spec_bin_array, w_err_mean_spec_bin_array,
-                               w_mean_phot_bin_array, w_err_mean_phot_bin_array,
-                               )).T
-
-        return_df = pd.DataFrame(to_pandas, columns=['mean_z_bin', 'n_obj',
-                                                     'mean_spec', 'err_mean_spec',
-                                                     'mean_phot', 'err_mean_phot',
-                                                     'w_mean_spec', 'w_err_mean_spec',
-                                                     'w_mean_phot', 'w_err_mean_phot',
-                                                     ])
-        return_df.index = df_index
-
-        return return_df
+    return return_df
 
 
-def weighted_nz_distributions(df, binning, weights=None, tomo_bins=np.array([0, 3.0]), z_phot=None, n_resample=50):
+def weighted_nz_distributions(df, binning, weights=None, tomo_bins=np.array([0, 5.0]), z_phot=None, n_resample=50):
     """
     :param df: pandas data-frame
     :param binning: center of redshift bins
@@ -234,36 +208,59 @@ def weighted_nz_distributions(df, binning, weights=None, tomo_bins=np.array([0, 
     if weights:
         assert weights in df.columns, str(weights) + ' not in df.columns'
         df[weights] = (df[weights] / df[weights].sum()).values  # normalize weights
+    else:
+        df[weights] = 1.0 / len(df)  # set uniform weights if none given
     if tomo_bins:
         assert isinstance(z_phot, np.ndarray), 'z_phot must be a numpy array'
         assert len(z_phot) == len(df), 'Length of z_phot must be equal to that of df'
         df['phot_sel'] = z_phot  # Make the selection photo-z a part of the DataFrame
-    assert 'z_spec' in df.columns, 'The df needs a "z_spec" columns'
+    assert 'z_spec' in df.columns, 'The df needs a "z_spec" in df.columns'
     pdf_names = ['pdf_' + str(i) for i in range(500) if 'pdf_' + str(i) in df.columns]
 
     phot_iter = {}
     spec_iter = {}
 
-    for j in range(len(tomo_bins) - 1):
+    # In the following section the tomographic bins are treated
+
+    for j in xrange(0, len(tomo_bins) - 1):
         sel = (df.phot_sel > tomo_bins[j]) & (df.phot_sel <= tomo_bins[j + 1])
         if sel.sum() > 0:
             df_sel = df[sel]
 
-            kde_array = np.zeros((n_resample, len(binning)))
-            nz_array = np.zeros((n_resample, len(binning)))
+            phot_iter[j + 1] = {}
+            spec_iter[j + 1] = {}
 
             for i in xrange(n_resample):
                 df_sample = df_sel.sample(n=len(df_sel), replace=True, weights=df_sel[weights])
-                kde_w_spec_pdf = gaussian_kde(df_sample.z_spec.values, bw_method='scott')
+                kde_w_spec_pdf = gaussian_kde(df_sample.z_spec.values, bw_method='silverman')
                 kde_w_spec_pdf = kde_w_spec_pdf(binning)
 
-                nz_array[i, :] = _normalize_pdf(df_sample[pdf_names].sum(), binning[1] - binning[0])
-                kde_array[i, :] = kde_w_spec_pdf
+                phot_iter[j + 1][i + 1] = _normalize_pdf(df_sample[pdf_names].sum(), binning[1] - binning[0]).values
+                spec_iter[j + 1][i + 1] = kde_w_spec_pdf
 
-            df_nz_array = pd.DataFrame(nz_array, columns=pdf_names)
-            df_kde_array = pd.DataFrame(kde_array, columns=pdf_names)
+            phot_iter[j + 1][0] = _normalize_pdf(df_sel[pdf_names].sum(), binning[1] - binning[0]).values
+            kde_w_spec_pdf = gaussian_kde(df_sel.z_spec.values, bw_method='silverman')
+            spec_iter[j + 1][0] = kde_w_spec_pdf(binning)
 
-            phot_iter[str(j)] = df_nz_array
-            spec_iter[str(j)] = df_kde_array
+    # In the following section the full n(z) is treated i.e not in tomographic bins
 
-    return phot_iter, spec_iter
+    sel = (df.phot_sel > tomo_bins[0]) & (df.phot_sel <= tomo_bins[len(tomo_bins) - 1])
+    df_sel = df[sel]
+    phot_iter[0] = {}
+    spec_iter[0] = {}
+
+    for i in xrange(n_resample):
+        df_sample = df_sel.sample(n=len(df_sel), replace=True, weights=df_sel[weights])
+        kde_w_spec_pdf = gaussian_kde(df_sample.z_spec.values, bw_method='silverman')
+        kde_w_spec_pdf = kde_w_spec_pdf(binning)
+
+        phot_iter[0][i + 1] = _normalize_pdf(df_sample[pdf_names].sum(), binning[1] - binning[0]).values
+        spec_iter[0][i + 1] = kde_w_spec_pdf
+
+    phot_iter[0][0] = _normalize_pdf(df_sel[pdf_names].sum(), binning[1] - binning[0]).values
+    kde_w_spec_pdf = gaussian_kde(df_sel.z_spec.values, bw_method='silverman')
+    spec_iter[0][0] = kde_w_spec_pdf(binning)
+
+    data_for_wl = {'binning': binning, 'phot': phot_iter, 'spec': spec_iter}
+
+    return phot_iter, spec_iter, data_for_wl
